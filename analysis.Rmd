@@ -1,0 +1,770 @@
+---
+title: "exp1_analysis"
+output: html_document
+date: "2023-04-27"
+---
+
+```{r load-packages, message=FALSE}
+library(tidyverse) 
+library(tidyr)
+library(rstatix)
+library(data.table)
+library(afex)
+library(emmeans)
+library(psych)
+library(ggprism)
+library(patchwork)
+library(magrittr)
+library(cowplot)
+```
+
+```{r import data}
+
+pilot <- read_csv("pilot_final.csv", show_col_types = FALSE)
+  
+```
+
+Changed the value of column relative_hp_dist and changed RT column to milliseconds. Tried mutate and transform functions to no avail. 
+
+```{r add new column for distractor location}
+pilot$relative_hp_dist[pilot$relative_hp_dist == 10] <- "no_dist"
+pilot$relative_hp_dist[pilot$relative_hp_dist == 0] <- "dist_0"
+pilot$relative_hp_dist[pilot$relative_hp_dist == 1] <- "dist_1"
+pilot$relative_hp_dist[pilot$relative_hp_dist == 2] <- "dist_2"
+pilot$relative_hp_dist[pilot$relative_hp_dist == 3] <- "dist_3"
+
+pilot$RT <- pilot$RT *1000
+```
+
+Add the block number to each trial because later I'll examine the block by block differences. 
+
+```{r add block number}
+block_num <- rep(c(1,2,3,4,5,6,7,8), each=60, times=21)
+pilot <- cbind(pilot, block_num)
+
+```
+
+### Trim the Data
+
+Define trimming criteria according to Van Selst and Jolicoeur 1994.
+```{r }
+xsize <- c(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20, 
+             25, 30, 35, 50, 100)
+stds <- c(1.458, 1.68, 1.841, 1.961, 2.05, 2.12, 2.173, 
+            2.22, 2.246, 2.274, 2.31, 2.326, 2.391, 2.41, 2.4305, 
+            2.45, 2.48, 2.5)
+```
+
+Trim the data and compute the percent trimmed
+```{r }
+trimmed <- pilot[pilot$acc==100, ] %>% group_by(ID, relative_hp_dist) %>%
+           mutate(sdc = ifelse(length(RT)>=100,2.5,approx(xsize,stds,xout=length(RT))$y), avg = mean(RT), stdev = sd(RT)) %>%
+           filter(RT <= sdc*stdev+avg & RT >=avg-(sdc*stdev) & RT >=.200) %>%
+           select(ID, relative_hp_dist, RT, block_num) %>%  #keep these columns in the new data frame
+           as.data.frame()
+
+
+statPrep <- trimmed %>% group_by(ID, relative_hp_dist) %>% summarise(measurement=mean(RT)) %>% as.data.frame()
+100-(nrow(trimmed)/nrow(pilot[pilot$acc==100, ]))*100
+```
+2.51% of trials were trimmed. 
+
+### Graph Distractor Location RTs
+
+```{r}
+
+sum_stats <- trimmed%>%
+  group_by(relative_hp_dist)%>%
+  summarize(mean_rts=mean(RT),
+            sd_rt=sd(RT),
+            n_rt=21,
+            se=sd_rt/sqrt(n_rt),
+            upper_limit=mean_rts+se,
+            lower_limit=mean_rts-se
+  )
+sum_stats
+
+```
+
+```{r }
+a<-ggplot(data = sum_stats, aes(x = relative_hp_dist, y = mean_rts, fill=relative_hp_dist)) +
+  #geom_point()+
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_errorbar(aes(ymin=lower_limit, ymax=upper_limit), width=0.2)+
+  coord_cartesian(ylim = c(700,1050))+
+  theme_classic()+
+  scale_fill_brewer(palette="Dark2") +
+  labs(x = "Distractor Location", y = "Response Time (ms)")+
+  labs(title = "Singleton Distractor Present")+
+  #labs(caption = "An ANOVA test shows a difference in RT depending on distractor location, F(3.28,65.57)=33.3, p<.001.")+
+  theme(axis.text=element_text(size=30),
+        axis.title=element_text(size=40,face="bold"),
+        title = element_text(size = 40))+
+  scale_x_discrete(labels= c("no_dist"="Absent","dist_0"="HP loc","dist_1"="dist-1","dist_2"="dist-2","dist_3"="dist-3"))
+  
+a
+
+```
+
+
+###Regression on each ppt for distance from HP location
+
+```{r}
+
+space <- trimmed %>%
+  group_by(ID, relative_hp_dist) %>%
+  summarize(rts = mean(RT)
+            )
+space
+  
+```
+
+Restructure data
+
+```{r}
+
+space_anova <- setDT(space)
+space_anova <- dcast(space_anova,ID~relative_hp_dist,value.var='rts')
+
+```
+
+```{r }
+
+space_anova2<-space_anova%>%
+  subset(select = c(ID, dist_0, dist_1, dist_2, dist_3))
+
+
+```
+
+Set up and run regression for each ppt based on RTs for each location. 
+```{r}
+design.mat <- cbind(1,2:5)
+response.mat <- t(space_anova2[,2:5])
+```
+
+```{r }
+
+reg <- lm.fit(design.mat, response.mat)$coefficients
+data <- cbind(space_anova, t(reg))
+
+```
+
+T-test to see if the slopes for each ppt are different than 0. Slopes are different than 0. 
+```{r}
+
+t.test(data$x2)
+
+```
+
+
+```{r}
+
+space2<-space%>%
+  filter(relative_hp_dist!="no_dist")
+
+z<-ggplot(data = space2,aes(x = relative_hp_dist, y = rts, group=ID, color=ID)) +
+  geom_line() +
+  geom_point()+
+  #geom_errorbar(aes(ymin=lower_limit, ymax=upper_limit), width=0.2)+
+  coord_cartesian(ylim = c(500,1500))+
+  theme_classic()+
+  scale_fill_brewer(palette="Dark2") +
+  labs(x = "Distractor Location", y = "Response Time (ms)")+
+  labs(title = "Singleton Distractor Present")+
+  #labs(caption = "An ANOVA test shows a difference in RT depending on distractor location, F(3.28,65.57)=33.3, p<.001.")+
+  #theme(axis.text=element_text(size=30),
+        #axis.title=element_text(size=40,face="bold"),
+        #title = element_text(size = 40))+
+  scale_x_discrete(labels= c("no_dist"="Absent","dist_0"="HP loc","dist_1"="dist-1","dist_2"="dist-2","dist_3"="dist-3"))
+  
+z
+
+```
+
+
+### Exploring Priming
+
+
+```{r}
+
+prime<-pilot%>%
+  filter(relative_hp_dist!="no_dist")
+
+```
+
+```{r}
+
+prime<-prime%>%
+  mutate(trial_type=
+           case_when(relative_hp_dist=="dist_0" & lag(relative_hp_dist)=="dist_0" ~ "high-high",
+                     relative_hp_dist=="dist_0" & lag(relative_hp_dist)=="dist_1" ~ "low-high",
+                     relative_hp_dist=="dist_0" & lag(relative_hp_dist)=="dist_2" ~ "low-high",
+                     relative_hp_dist=="dist_0" & lag(relative_hp_dist)=="dist_3" ~ "low-high",
+             
+           ))
+
+```
+
+Get rid of NA trials
+
+```{r}
+
+prime1 <- prime%>%
+  na.omit(prime)%>%
+  subset(select=c(ID, acc, trial_type, block_num, RT))
+
+```
+
+Group blocks in pairs
+```{r}
+
+prime1<-prime1%>%
+  mutate(block_num=
+           case_when(block_num==1 ~1,
+                     block_num==2 ~1,
+                     block_num==3 ~1,
+                     block_num==4 ~1,
+                     block_num==5 ~2,
+                     block_num==6 ~2,
+                     block_num==7 ~2,
+                     block_num==8 ~2,
+             
+           ))
+
+```
+
+Trim
+```{r}
+trim_prime <- prime1[prime1$acc==100, ]%>% group_by(ID, trial_type, block_num) %>%
+           mutate(sdc = ifelse(length(RT)>=100,2.5,approx(xsize,stds,xout=length(RT))$y), avg = mean(RT), stdev = sd(RT)) %>%
+           filter(RT <= sdc*stdev+avg & RT >=avg-(sdc*stdev) & RT >=.200) %>%
+           select(ID, RT, block_num, trial_type) %>%  #keep these columns in the new data frame
+           as.data.frame()
+
+
+statPrep <- trim_prime %>% group_by(ID, trial_type, block_num) %>% summarise(measurement=mean(RT)) %>% as.data.frame()
+100-(nrow(trim_prime)/nrow(prime1[prime1$acc==100, ]))*100
+```
+Trimmed 2.5% of trials. 
+
+```{r }
+
+prime_anova<-trim_prime%>%
+  group_by(ID, block_num, trial_type)%>%
+  summarize(rt=mean(RT))
+
+```
+
+
+2-way ANOVA with block number and trial type (high-high or low-high) as factors. 
+
+```{r}
+
+model <- aov_ez("ID", "rt", prime_anova, between=NULL, within = c("block_num", "trial_type"))
+
+model
+
+
+```
+
+Plot the above data
+
+```{r}
+
+y<-ggplot(data = prime_anova, aes(x = block_num, y = rt, fill=trial_type)) +
+  geom_bar(stat = "summary", position= position_dodge(), show.legend = TRUE) +
+  coord_cartesian(ylim = c(700,1050))+
+  theme_classic()
+
+```
+
+###Distractor Location ANOVA
+
+```{r all-location+absent}
+
+aov_ez("ID", "rts", space, between=NULL, within = c("relative_hp_dist"))
+
+```
+
+```{r all-location-without-absent}
+
+aov_ez("ID", "rts", space2, between=NULL, within = c("relative_hp_dist"))
+
+```
+
+```{r}
+
+space %>%
+  pairwise_t_test(
+    rts ~ relative_hp_dist, paired = TRUE,
+    p.adjust.method = "holm"
+    )
+
+
+```
+
+### Distractor Location Accuracy
+
+```{r}
+
+spaceT <- pilot %>%
+  group_by(ID, relative_hp_dist)%>%
+  summarize(acc = mean(acc)
+            )
+
+space_anovaT <- setDT(spaceT)
+space_anovaT <- dcast(space_anovaT,ID~relative_hp_dist,value.var='acc')
+
+space_anovaT <- space_anovaT %>%
+  mutate(low_prob = (dist_1+dist_2+dist_3)/3) 
+
+df_mod_dist <- subset(space_anovaT, select=c(ID,dist_0, low_prob,no_dist))
+df_mod_dist <- reshape2::melt(df_mod_dist, id.var=c('ID'), variable.name= "relative_hp_dist")
+
+```
+ANOVA test for differences between 4 distractor locations and absent
+```{r}
+
+aov_ez("ID", "acc", spaceT, between=NULL, within = c("relative_hp_dist"))
+
+```
+ANOVA test for differences between HP, LP, and absent conditions. 
+```{r}
+
+aov_ez("ID", "value", df_mod_dist, between=NULL, within = c("relative_hp_dist"))
+
+```
+
+
+```{r}
+
+sum_statsT <- spaceT%>%
+  group_by(relative_hp_dist)%>%
+  summarize(mean_acc=mean(acc),
+            sd_rt=sd(acc),
+            n_rt=n(),
+            se=sd_rt/sqrt(n_rt),
+            upper_limit=mean_acc+se,
+            lower_limit=mean_acc-se
+  )
+sum_statsT
+
+```
+
+```{r}
+
+b<-ggplot(data = sum_statsT, aes(x = relative_hp_dist, y = mean_acc, fill=relative_hp_dist)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_errorbar(aes(ymin=lower_limit, ymax=upper_limit), width=0.2)+
+  coord_cartesian(ylim = c(85,100))+
+  theme_classic()+
+  scale_fill_brewer(palette="Dark2")+
+  labs(x = "Distractor Location", y = "Accuracy (%)")+
+  #labs(title = "Distractor Location Effect on Accuracy")+
+  theme(axis.text=element_text(size=30),
+        axis.title=element_text(size=40,face="bold"),
+        title = element_text(size = 24))+
+  scale_x_discrete(labels= c("no_dist"="Absent","dist_0"="HP loc","dist_1"="1","dist_2"="2","dist_3"="3"))
+
+b
+
+```
+
+
+
+
+
+### Examine block-by-block learning of distractor location
+
+The goal of this section is to examine individual blocks of trials for learning. I'll be taking the difference between response times when the distractor is presented in the low probability locations and response times when the distractor is presented in the high probability location in each block to see roughly how quickly individuals are learning the regularity.
+
+
+```{r}
+space_block <- trimmed %>%
+  group_by(ID, block_num, relative_hp_dist) %>%
+  summarize(rts = mean(RT),
+            )
+space_block
+```
+
+```{r}
+
+space_block <- setDT(space_block)
+space_block <- dcast(space_block,ID+block_num~relative_hp_dist,value.var='rts')
+
+```
+
+Below, I added the average rt for the low probability locations and the difference between the low probability and high probability locations ignoring n/a values. 
+
+```{r}
+
+space_block <- space_block %>%
+  mutate(low_prob = rowMeans(select(space_block, c(dist_1,dist_2,dist_3)),na.rm=TRUE)) %>%
+  mutate(difference = (low_prob-dist_0))
+
+
+```
+
+
+```{r}
+ggplot(data = space_block,aes(x=block_num, y=difference, group=ID))+
+  geom_line(aes(color=ID))+
+  geom_point()+
+  labs(title = "Difference in Response Times", subtitle = "for distractor presentation at the low-probability locations and high-probability location by block")+
+  theme_classic()+
+  labs(x = "Block Number", y = "Difference in RT (ms)")
+
+```
+
+
+
+
+```{r}
+space2 <- space_block %>%
+  group_by(block_num) %>%
+  summarize(rts = mean(difference, na.rm = TRUE),
+            sd_rt=sd(difference, na.rm = TRUE),
+            n_rt=n(),
+            se=sd_rt/sqrt(n_rt),
+            upper_limit=rts+se,
+            lower_limit=rts-se
+            )
+
+```
+
+```{r line_plot_avg, fig.height=4, fig.width=12}
+ggplot(data = space2,aes(x=block_num, y=rts))+
+  geom_line()+
+  geom_point()+
+  geom_errorbar(aes(ymin=lower_limit, ymax=upper_limit), width=0.2)+
+  labs(title = "Singleton Distractor Present")+
+  xlab("Block number")+
+  ylab(expression(atop("Suppression effect (ms)", paste("(low prob.- high prob.)"))))+
+  theme(axis.text=element_text(size=14),
+        axis.title=element_text(size=14,face="bold"),
+        title = element_text(size = 16))
+
+```
+
+
+```{r anova_test_by_block}
+
+
+aov_ez("ID", "difference", space_block, between=NULL, within = c("block_num"))
+
+
+```
+
+
+###Examine Target Location Effects
+
+```{r import_data}
+
+pilot <- read_csv("pilot_final1.csv", show_col_types = FALSE)
+
+pilot$relative_hp_dist[pilot$relative_hp_dist == 10] <- "no_dist"
+pilot$relative_hp_dist[pilot$relative_hp_dist == 0] <- "dist_0"
+pilot$relative_hp_dist[pilot$relative_hp_dist == 1] <- "dist_1"
+pilot$relative_hp_dist[pilot$relative_hp_dist == 2] <- "dist_2"
+pilot$relative_hp_dist[pilot$relative_hp_dist == 3] <- "dist_3"
+pilot$RT <- pilot$RT *1000
+  
+```
+
+Added in the block column at this point just in case I want to use it in the future. 
+
+```{r add_column_for_trial_block}
+
+block_num <- rep(c(1,2,3,4,5,6,7,8), each=60, times=21)
+pilot <- cbind(pilot, block_num)
+
+```
+
+Added in a column for how the target related to the high-probability distractor location. Used brute force instead of trying to write a fancy function. 
+
+```{r add_column_for_target_distance_from_the_high_probability_location}
+
+pilot <- pilot %>%
+  mutate(relative_target=
+           case_when(target_loc=="loc1" & high_prob==1 ~ 0,
+                     target_loc=="loc2" & high_prob==1 ~ 1,
+                     target_loc=="loc3" & high_prob==1 ~ 2,
+                     target_loc=="loc4" & high_prob==1 ~ 3,
+                     target_loc=="loc5" & high_prob==1 ~ 2,
+                     target_loc=="loc6" & high_prob==1 ~ 1,
+                     target_loc=="loc1" & high_prob==2 ~ 1,
+                     target_loc=="loc2" & high_prob==2 ~ 0,
+                     target_loc=="loc3" & high_prob==2 ~ 1,
+                     target_loc=="loc4" & high_prob==2 ~ 2,
+                     target_loc=="loc5" & high_prob==2 ~ 3,
+                     target_loc=="loc6" & high_prob==2 ~ 2,
+                     target_loc=="loc1" & high_prob==3 ~ 2,
+                     target_loc=="loc2" & high_prob==3 ~ 1,
+                     target_loc=="loc3" & high_prob==3 ~ 0,
+                     target_loc=="loc4" & high_prob==3 ~ 1,
+                     target_loc=="loc5" & high_prob==3 ~ 2,
+                     target_loc=="loc6" & high_prob==3 ~ 3,
+                     target_loc=="loc1" & high_prob==4 ~ 3,
+                     target_loc=="loc2" & high_prob==4 ~ 2,
+                     target_loc=="loc3" & high_prob==4 ~ 1,
+                     target_loc=="loc4" & high_prob==4 ~ 0,
+                     target_loc=="loc5" & high_prob==4 ~ 1,
+                     target_loc=="loc6" & high_prob==4 ~ 2,
+                     target_loc=="loc1" & high_prob==5 ~ 2,
+                     target_loc=="loc2" & high_prob==5 ~ 3,
+                     target_loc=="loc3" & high_prob==5 ~ 2,
+                     target_loc=="loc4" & high_prob==5 ~ 1,
+                     target_loc=="loc5" & high_prob==5 ~ 0,
+                     target_loc=="loc6" & high_prob==5 ~ 1,
+                     target_loc=="loc1" & high_prob==6 ~ 1,
+                     target_loc=="loc2" & high_prob==6 ~ 2,
+                     target_loc=="loc3" & high_prob==6 ~ 3,
+                     target_loc=="loc4" & high_prob==6 ~ 2,
+                     target_loc=="loc5" & high_prob==6 ~ 1,
+                     target_loc=="loc6" & high_prob==6 ~ 0,))
+
+pilot$relative_target[pilot$relative_target == 0] <- "high_prob"
+pilot$relative_target[pilot$relative_target == 1] <- "lp_1"
+pilot$relative_target[pilot$relative_target == 2] <- "lp_2"
+pilot$relative_target[pilot$relative_target == 3] <- "lp_3"
+
+```
+
+### Trim the Data
+
+Define trimming criteria according to Van Selst and Jolicoeur 1994
+```{r set_stds_depending_on_set_size}
+xsize <- c(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20, 
+             25, 30, 35, 50, 100)
+stds <- c(1.458, 1.68, 1.841, 1.961, 2.05, 2.12, 2.173, 
+            2.22, 2.246, 2.274, 2.31, 2.326, 2.391, 2.41, 2.4305, 
+            2.45, 2.48, 2.5)
+```
+
+Trim the data and compute the percent trimmed
+```{r trimming}
+add_this<- pilot[pilot$acc==100,]
+
+trimmed <- add_this[add_this$relative_hp_dist=="no_dist",] %>% 
+  group_by(ID, relative_target) %>%
+           mutate(sdc = ifelse(length(RT)>=100,2.5,approx(xsize,stds,xout=length(RT))$y), avg = mean(RT), stdev = sd(RT)) %>%
+           filter(RT <= sdc*stdev+avg & RT >=avg-(sdc*stdev) & RT >=.200) %>%
+           select(ID, relative_hp_dist, RT, block_num, relative_target) %>%
+           as.data.frame()
+
+
+statPrep <- trimmed %>% group_by(ID, relative_target) %>% summarise(measurement=mean(RT)) %>% as.data.frame()
+100-(nrow(trimmed)/nrow(add_this[add_this$relative_hp_dist=="no_dist",]))*100
+```
+
+```{r create new df with mean rts}
+
+target_means <- trimmed %>%
+  filter(relative_hp_dist=="no_dist") %>%
+  group_by(relative_target) %>%
+  summarize(mean_rts=mean(RT),
+            sd_rt=sd(RT),
+            n_rt=21,
+            se=sd_rt/sqrt(n_rt),
+            upper_limit=mean_rts+se,
+            lower_limit=mean_rts-se
+  )
+target_means
+
+```
+
+This figure displays the mean response times depending on the location of the target relative to the high probability location of the distractor. I chose those particular colors based on Wake Forest's color scheme. 
+
+
+```{r - graph 1 - distractor location effect on rt, fig.height=9, fig.width=12}
+c<-ggplot(data = target_means, aes(x = relative_target, y = mean_rts, fill=relative_target)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_errorbar(aes(ymin=lower_limit, ymax=upper_limit), width=0.2)+
+  coord_cartesian(ylim = c(700,1000))+
+  theme_classic()+
+  scale_fill_brewer(palette="Dark2")+
+  labs(x = "Target Location", y = "Response Time (ms)")+
+  labs(title = "Singleton Distractor Absent")+
+  theme(axis.text=element_text(size=30),
+    axis.title=element_text(size=40,face="bold"),
+    title = element_text(size = 40))+
+  scale_x_discrete(labels= c("high_prob"="HP loc","lp_1"="dist-1", "lp_2"="dist-2", "lp_3"="dist-3"))
+  
+
+c
+
+```
+
+
+```{r}
+
+space <- trimmed %>%
+  subset(relative_hp_dist=="no_dist")%>%
+  group_by(ID, relative_target) %>%
+  summarize(rts = mean(RT),
+            )
+space
+  
+```
+
+```{r}
+
+aov_ez("ID", "rts", space, between=NULL, within = c("relative_target"))
+
+
+```
+
+```{r}
+
+space_anova <- setDT(space)
+space_anova <- dcast(space_anova,ID~relative_target,value.var='rts')
+
+```
+
+
+```{r get_low-prob_avg}
+
+space_anova <- space_anova %>%
+  mutate(low_prob = (lp_1+lp_2+lp_3)/3)
+
+```
+
+```{r get_info_for_smaller_figure}
+
+df_mod <- subset(space_anova, select=c(ID, high_prob, low_prob))
+
+df_mod <- reshape2::melt(df_mod, id.var=c('ID'), variable.name= "relative_target")
+
+```
+
+```{r another_df_with_mean_rts}
+
+sum_stats2 <- df_mod%>%
+  group_by(relative_target)%>%
+  summarize(mean_rts=mean(value),
+            sd_rt=sd(value),
+            n_rt=n(),
+            se=sd_rt/sqrt(n_rt),
+            upper_limit=mean_rts+se,
+            lower_limit=mean_rts-se
+  )
+sum_stats2
+
+```
+
+Determine if the difference between response times when the target is in the high-probability vs. low-probability locations is significant. 
+
+```{r t-test}
+
+t.test(x=space_anova$high_prob, y=space_anova$low_prob, alternative="greater", mu=0,paired = TRUE, conf.level = .95)
+
+```
+
+```{r - graph 2 - target location effect on rt}
+
+  
+sum_stats2$relative_target <- factor(sum_stats2$relative_target,              # Change ordering manually
+                  levels = c("high_prob", "low_prob"))
+
+ggplot(data = sum_stats2, aes(x = relative_target, y = mean_rts, fill=relative_target)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_errorbar(aes(ymin=lower_limit, ymax=upper_limit), width=0.2)+
+  coord_cartesian(ylim = c(700,1000))+
+  theme_classic()+
+  scale_fill_brewer(palette="Dark2") +
+  labs(x = "Target Location", y = "Response Time (ms)")+
+  labs(title = "Singleton Distractor Absent")+
+  theme(axis.text=element_text(size=30),
+        axis.title=element_text(size=40,face="bold"),
+        title = element_text(size = 45))+
+  scale_x_discrete(labels= c("high_prob"="HP loc","low_prob"="LP loc"))
+  
+
+
+```
+
+
+###Target Location Effects on Accuracy
+
+
+```{r accuracy_target}
+
+pilot_targ <- pilot %>%
+  subset(relative_hp_dist=="no_dist")%>%
+  group_by(ID, relative_target) %>%
+  summarize(accuracy = mean(acc)
+            )
+
+pilot_targ
+
+```
+
+
+```{r}
+
+aov_ez("ID", "accuracy", pilot_targ, between=NULL, within = c("relative_target"))
+
+```
+
+```{r t-test-target-acc}
+
+targ_t <- setDT(pilot_targ)
+targ_t <- dcast(pilot_targ,ID~relative_target,value.var='accuracy')
+
+targ_t <- targ_t %>%
+  mutate(low_prob = (lp_1+lp_2+lp_3)/3)
+
+targ_t %>%
+  t.test(x=targ_t$low_prob, y=targ_t$high_prob, alternative="greater", mu=0,paired = TRUE, conf.level = .95) 
+
+
+```
+```{r}
+
+sum_targ <- pilot_targ%>%
+  group_by(relative_target)%>%
+  summarize(mean_acc=mean(accuracy),
+            sd_rt=sd(accuracy),
+            n_rt=n(),
+            se=sd_rt/sqrt(n_rt),
+            upper_limit=mean_acc+se,
+            lower_limit=mean_acc-se
+  )
+sum_targ
+
+```
+
+```{r }
+
+d<-ggplot(data = sum_targ, aes(x = relative_target, y = mean_acc, fill=relative_target)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_errorbar(aes(ymin=lower_limit, ymax=upper_limit), width=0.2)+
+  coord_cartesian(ylim = c(85,100))+
+  theme_classic()+
+  scale_fill_brewer(palette="Dark2")+
+  labs(x = "Distractor Location", y = "Accuracy (%)")+
+  #labs(title = "Distractor Location Effect on Accuracy")+
+  theme(axis.text=element_text(size=30),
+        axis.title=element_text(size=40,face="bold"),
+        title = element_text(size = 24))+
+  scale_x_discrete(labels= c("no_dist"="Absent","dist_0"="HP loc","dist_1"="1","dist_2"="2","dist_3"="3"))
+
+d
+
+```
+
+### Make Figures
+
+```{r join-2-figures, fig.height=11, fig.width=22}
+
+plot_grid(a,b,labels = c('A','B'), label_size=40, rel_widths = c(1.5,1))
+
+
+```
+
+```{r join-2-figures2, fig.height=11, fig.width=22}
+
+plot_grid(c,d,labels = c('C','D'), label_size=40, rel_widths = c(1.5,1))
+
+
+```
